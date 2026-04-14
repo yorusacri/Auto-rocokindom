@@ -6,10 +6,11 @@ class AppConfig:
     # A visible window title keyword for your game client.
     window_title_keyword: str = "洛克王国：世界"
 
-    # Fixed target resolution for phase 1.
-    expected_window_width: int = 2560
-    expected_window_height: int = 1600
-    require_exact_resolution: bool = True
+    # Reference resolution for template matching.
+    # 2560x1600 is recommended for best matching accuracy.
+    ref_width: int = 2560
+    ref_height: int = 1600
+    require_exact_resolution: bool = False
 
     # Polling interval must be <= 5.0 seconds per user requirement.
     poll_interval_sec: float = 5.0
@@ -20,7 +21,7 @@ class AppConfig:
     trigger_cooldown_sec: float = 1.0
 
     # Detection settings.
-    match_threshold: float = 0.63
+    match_threshold: float = 0.50
     required_hits: int = 1
     release_misses: int = 2
     use_edge_match: bool = True

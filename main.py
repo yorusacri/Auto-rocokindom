@@ -9,6 +9,7 @@ import cv2
 import keyboard
 import mss
 import numpy as np
+import ctypes
 try:
     import win32gui
 except ImportError:
@@ -16,6 +17,13 @@ except ImportError:
 
 import win32api
 import win32con
+
+# DPI Awareness
+try:
+    ctypes.windll.user32.SetProcessDPIAware()
+except Exception:
+    pass
+
 from config import CONFIG
 
 
@@ -151,17 +159,24 @@ def capture_bgr(sct: mss.mss, roi: Tuple[int, int, int, int]) -> np.ndarray:
         raise e
 
 
-def best_match_score(frame_processed: np.ndarray, templates: List[Template]) -> Tuple[float, str, Tuple[int, int]]:
+def best_match_score(frame_processed: np.ndarray, templates: List[Template], scale: float = 1.0) -> Tuple[float, str, Tuple[int, int]]:
     best_score = -1.0
     best_name = ""
     best_loc = (0, 0)
     fh, fw = frame_processed.shape[:2]
 
     for tpl in templates:
-        th, tw = tpl.image.shape[:2]
+        tpl_img = tpl.image
+        # If running on non-reference resolution, resize template dynamically
+        if abs(scale - 1.0) > 0.01:
+            new_w = max(1, int(tpl_img.shape[1] * scale))
+            new_h = max(1, int(tpl_img.shape[0] * scale))
+            tpl_img = cv2.resize(tpl_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        th, tw = tpl_img.shape[:2]
         if th > fh or tw > fw:
             continue
-        result = cv2.matchTemplate(frame_processed, tpl.image, cv2.TM_CCOEFF_NORMED)
+        result = cv2.matchTemplate(frame_processed, tpl_img, cv2.TM_CCOEFF_NORMED)
         _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
         if max_val > best_score:
             best_score = float(max_val)
@@ -228,6 +243,8 @@ def run() -> None:
     print("\n请选择运行模式:")
     print("1: 聚能模式 (自动键入 X)")
     print("2: 逃跑模式 (自动键入 ESC 并点击确认)")
+    print("\n[提示] 建议游戏分辨率设为 2560x1600 (16:10) 以获得最佳识别效果。")
+    print("如果使用其他比例(如4:3)，图像可能会形变导致识别失败。")
     choice = input("请输入选项 (1 或 2): ").strip()
     mode = "battle" if choice != "2" else "escape"
     logging.info("已选择模式: %s", "聚能模式" if mode == "battle" else "逃跑模式")
@@ -260,26 +277,17 @@ def run() -> None:
                 time.sleep(interval)
                 continue
 
-            if CONFIG.require_exact_resolution:
-                if (
-                    width != CONFIG.expected_window_width
-                    or height != CONFIG.expected_window_height
-                ):
-                    logging.warning(
-                        "Resolution mismatch: got %sx%s, expected %sx%s",
-                        width,
-                        height,
-                        CONFIG.expected_window_width,
-                        CONFIG.expected_window_height,
-                    )
-                    time.sleep(interval)
-                    continue
+            # Calculate dynamic scale based on reference resolution
+            scale = width / CONFIG.ref_width
+            if abs(scale - 1.0) > 0.05:
+                logging.debug("Scaling templates by factor: %.2f (width=%d)", scale, width)
 
             roi = build_roi(left, top, width, height)
             frame_bgr = capture_bgr(sct, roi)
             frame_processed = preprocess(frame_bgr)
 
-            score, name, center_loc = best_match_score(frame_processed, templates)
+            # Pass the scale factor for resolution independence
+            score, name, center_loc = best_match_score(frame_processed, templates, scale=scale)
             is_hit = score >= CONFIG.match_threshold
 
             if is_hit:
@@ -326,7 +334,7 @@ def run() -> None:
                             time.sleep(0.3)
                             full_shot = capture_bgr(sct, (left, top, width, height))
                             
-                            # Using the dual matching strategy we implemented
+                            # Using the dual matching strategy with scaling
                             full_processed_edge = preprocess(full_shot)
                             full_processed_gray = cv2.cvtColor(full_shot, cv2.COLOR_BGR2GRAY)
                             
@@ -335,15 +343,19 @@ def run() -> None:
                             
                             for tpl in templates:
                                 if "yes" not in tpl.name.lower(): continue
-                                res_edge = cv2.matchTemplate(full_processed_edge, tpl.image, cv2.TM_CCOEFF_NORMED)
-                                res_gray = cv2.matchTemplate(full_processed_gray, tpl.image, cv2.TM_CCOEFF_NORMED)
+                                t_img = tpl.image
+                                if abs(scale - 1.0) > 0.01:
+                                    t_img = cv2.resize(t_img, (max(1, int(t_img.shape[1] * scale)), max(1, int(t_img.shape[0] * scale))), interpolation=cv2.INTER_AREA)
+
+                                res_edge = cv2.matchTemplate(full_processed_edge, t_img, cv2.TM_CCOEFF_NORMED)
+                                res_gray = cv2.matchTemplate(full_processed_gray, t_img, cv2.TM_CCOEFF_NORMED)
                                 _, max_v_edge, _, max_l_edge = cv2.minMaxLoc(res_edge)
                                 _, max_v_gray, _, max_l_gray = cv2.minMaxLoc(res_gray)
                                 
                                 cur_v, cur_l = (max_v_edge, max_l_edge) if max_v_edge > max_v_gray else (max_v_gray, max_l_gray)
                                 if cur_v > best_score_this_round:
                                     best_score_this_round = cur_v
-                                    best_loc_this_round = (cur_l[0] + tpl.image.shape[1]//2, cur_l[1] + tpl.image.shape[0]//2)
+                                    best_loc_this_round = (cur_l[0] + t_img.shape[1]//2, cur_l[1] + t_img.shape[0]//2)
 
                             if best_score_this_round >= (CONFIG.match_threshold * 0.8):
                                 # Perform physical click (which includes logging the screen pos)
