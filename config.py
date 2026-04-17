@@ -30,16 +30,16 @@ class AppConfig:
     release_misses: int = 2
     use_edge_match: bool = True
 
-    # Right-bottom ROI ratios for 2560x1600.
-    # These can be tuned without code changes.
-    roi_left_ratio: float = 0.77
-    roi_top_ratio: float = 0.72
-    roi_width_ratio: float = 0.22
-    roi_height_ratio: float = 0.27
+    # Detection ROI: right-bottom quarter of the window.
+    roi_left_ratio: float = 0.5
+    roi_top_ratio: float = 0.5
+    roi_width_ratio: float = 0.5
+    roi_height_ratio: float = 0.5
 
     # Templates.
     template_dir: str = "templates"
     template_pattern: str = "*.png"
+    chat_template_name: str = "chat.png"
 
     # Runtime controls.
     stop_hotkey: str = "f8"

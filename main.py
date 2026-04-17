@@ -39,6 +39,11 @@ class Template:
     image: np.ndarray
 
 
+def normalize_template_name(name: str) -> str:
+    # Normalize for robust comparisons across path and filename case variations.
+    return os.path.basename(name).strip().lower()
+
+
 def setup_logging() -> None:
     os.makedirs("logs", exist_ok=True)
     logging.basicConfig(
@@ -69,10 +74,10 @@ def log_audit(event: str, **payload: object) -> None:
 
 def normalize_poll_interval(interval: float) -> float:
     if interval <= 0:
-        logging.warning("poll_interval_sec <= 0, fallback to 5.0")
+        logging.warning("轮询间隔 poll_interval_sec <= 0，已回退到 5.0")
         return 5.0
     if interval > 5.0:
-        logging.warning("poll_interval_sec > 5.0, clamped to 5.0")
+        logging.warning("轮询间隔 poll_interval_sec > 5.0，已钳制到 5.0")
         return 5.0
     return interval
 
@@ -138,7 +143,7 @@ def load_templates() -> List[Template]:
     for path in paths:
         raw = cv2.imread(path)
         if raw is None:
-            logging.warning("skip unreadable template: %s", path)
+            logging.warning("跳过无法读取的模板: %s", path)
             continue
         # Use simple gray for yes.png if it's a simple button
         if "yes" in path.lower():
@@ -152,7 +157,7 @@ def load_templates() -> List[Template]:
             "No template images found. Put PNG files into templates/ first."
         )
 
-    logging.info("Loaded %d templates", len(templates))
+    logging.info("已加载模板数量: %d", len(templates))
     return templates
 
 
@@ -195,7 +200,7 @@ def capture_window_bgr(hwnd: int) -> np.ndarray:
     expected_size = client_h * client_w * 4
     if len(img) != expected_size:
         # 如果长度不符，返回一个空图并记录警告
-        logging.warning(f"Capture data size mismatch: expected {expected_size}, got {len(img)}")
+        logging.warning(f"截图数据长度不匹配: 期望 {expected_size}, 实际 {len(img)}")
         img = np.zeros(expected_size, dtype='uint8')
 
     img.shape = (client_h, client_w, 4)
@@ -209,10 +214,11 @@ def capture_window_bgr(hwnd: int) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
 
-def best_match_score(frame_processed: np.ndarray, templates: List[Template], scale: float = 1.0) -> Tuple[float, str, Tuple[int, int]]:
+def best_match_score(frame_processed: np.ndarray, templates: List[Template], scale: float = 1.0) -> Tuple[float, str, Tuple[int, int], List[Tuple[str, float]]]:
     best_score = -1.0
     best_name = ""
     best_loc = (0, 0)
+    all_scores = []
     fh, fw = frame_processed.shape[:2]
 
     for tpl in templates:
@@ -228,13 +234,17 @@ def best_match_score(frame_processed: np.ndarray, templates: List[Template], sca
             continue
         result = cv2.matchTemplate(frame_processed, tpl_img, cv2.TM_CCOEFF_NORMED)
         _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
-        if max_val > best_score:
-            best_score = float(max_val)
+        
+        current_score = float(max_val)
+        all_scores.append((tpl.name, current_score))
+        
+        if current_score > best_score:
+            best_score = current_score
             best_name = tpl.name
             # Center of the match
             best_loc = (max_loc[0] + tw // 2, max_loc[1] + th // 2)
 
-    return best_score, best_name, best_loc
+    return best_score, best_name, best_loc, all_scores
 
 
 def best_yes_score_and_loc(frame_bgr: np.ndarray, templates: List[Template], scale: float) -> Tuple[float, Tuple[int, int]]:
@@ -275,7 +285,7 @@ def best_yes_score_and_loc(frame_bgr: np.ndarray, templates: List[Template], sca
 
 def press_once(hwnd: int, key: str) -> None:
     if win32gui is None:
-        logging.info("Mocking key press for non-Windows environment: %s", key)
+        logging.info("非 Windows 环境，模拟按键: %s", key)
         return
     
     # Handle special keys or length > 1
@@ -284,7 +294,7 @@ def press_once(hwnd: int, key: str) -> None:
     elif len(key) == 1:
         vk_code = win32api.VkKeyScan(key) & 0xFF
     else:
-        logging.warning("Unsupported key string: %s", key)
+        logging.warning("不支持的按键字符串: %s", key)
         return
 
     # Map virtual key to scan code
@@ -301,7 +311,7 @@ def press_once(hwnd: int, key: str) -> None:
 
 def click_at(hwnd: int, x: int, y: int) -> bool:
     if win32gui is None:
-        logging.info("Mocking click at (%d, %d)", x, y)
+        logging.info("非 Windows 环境，模拟点击 (%d, %d)", x, y)
         return True
     
     # Convert client (x, y) to screen coordinates and do a physical click.
@@ -315,69 +325,92 @@ def click_at(hwnd: int, x: int, y: int) -> bool:
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.1)
         win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-        logging.info("Performed physical click at screen pos %s", screen_pos)
+        logging.info("已执行物理点击，屏幕坐标: %s", screen_pos)
         return True
     except Exception as e:
-        logging.warning("Failed to perform physical click: %s", e)
+        logging.warning("执行物理点击失败: %s", e)
         return False
 
 
 def run() -> None:
     setup_logging()
 
-    logging.info("Starting detector. Stop hotkey: %s", CONFIG.stop_hotkey)
-    logging.info("This script is for authorized testing only.")
+    logging.info("检测器已启动，停止热键: %s", CONFIG.stop_hotkey)
+    logging.info("本脚本仅用于授权测试。")
 
     print("\n请选择运行模式:")
     print("1: 聚能模式 (自动键入 X)")
     print("2: 逃跑模式 (自动键入 ESC 并点击确认)")
+    print("3: 战斗计数 (仅计数，不执行自动操作)")
     print("有问题或新功能建议请提 issue。如果这个项目对你有帮助，欢迎点个 Star 支持一下。")
     print("\n[提示] 脚本支持自适应分辨率，推荐使用 2K（2560x1600 或 2560x1440）以获得更高识别精度。")
     print("分辨率越低 Score 可能越低；若识别异常，可在当前分辨率下重截 templates 进行适配。")
     print("[提示] 逃跑模式使用物理点击，请确保“是”按钮露出且不被其他窗口遮挡。")
-    choice = input("请输入选项 (1 或 2): ").strip()
-    mode = "battle" if choice != "2" else "escape"
-    logging.info("已选择模式: %s", "聚能模式" if mode == "battle" else "逃跑模式")
+    choice = input("请输入选项 (1 / 2 / 3): ").strip()
+    if choice == "2":
+        mode = "escape"
+        mode_label = "逃跑模式"
+    elif choice == "3":
+        mode = "count_only"
+        mode_label = "战斗计数模式"
+    else:
+        mode = "battle"
+        mode_label = "聚能模式"
+    logging.info("已选择模式: %s", mode_label)
     log_audit(
-        "MODE_SELECTED",
-        mode=mode,
-        match_threshold=CONFIG.match_threshold,
-        trigger_cooldown_sec=CONFIG.trigger_cooldown_sec,
-        escape_click_method=CONFIG.escape_click_method,
+        "模式已选择",
+        模式=mode,
     )
 
     templates = load_templates()
     interval = normalize_poll_interval(CONFIG.poll_interval_sec)
+    chat_template_key = normalize_template_name(CONFIG.chat_template_name)
+    loaded_template_keys = {normalize_template_name(t.name) for t in templates}
+    if chat_template_key not in loaded_template_keys:
+        logging.warning(
+            "聊天模板未加载: 配置=%s 已加载=%s",
+            CONFIG.chat_template_name,
+            sorted(loaded_template_keys),
+        )
+        log_audit(
+            "聊天模板缺失",
+            配置=CONFIG.chat_template_name,
+        )
+    else:
+        logging.info("聊天模板已加载: %s", chat_template_key)
 
     hit_streak = 0
     miss_streak = 0
     in_battle_state = False
     last_trigger_time = 0.0
 
+    battle_count = 0
+    chat_detected_last = False
+
     with mss.mss() as sct:
         while True:
             # On Windows, monitor hotkey to stop
             if win32gui is not None:
                 if keyboard.is_pressed(CONFIG.stop_hotkey):
-                    logging.info("Stop hotkey pressed. Exiting.")
+                    logging.info("检测到停止热键，程序退出。")
                     break
             
             hwnd = find_window_by_keyword(CONFIG.window_title_keyword)
             if hwnd is None:
-                logging.warning("Game window not found: %s", CONFIG.window_title_keyword)
+                logging.warning("未找到游戏窗口: %s", CONFIG.window_title_keyword)
                 time.sleep(interval)
                 continue
 
             left, top, width, height = get_client_rect_on_screen(hwnd)
             if width <= 0 or height <= 0:
-                logging.warning("Invalid window size: %sx%s", width, height)
+                logging.warning("窗口尺寸无效: %sx%s", width, height)
                 time.sleep(interval)
                 continue
 
             # Calculate dynamic scale based on reference resolution
             scale = width / CONFIG.ref_width
             if abs(scale - 1.0) > 0.05:
-                logging.debug("Scaling templates by factor: %.2f (width=%d)", scale, width)
+                logging.debug("模板缩放系数: %.2f（窗口宽度=%d）", scale, width)
 
             # --- 改动：使用 capture_window_bgr 代替 capture_bgr 以支持后台/遮挡抓取 ---
             # 1. 抓取全屏
@@ -388,14 +421,51 @@ def run() -> None:
             roi_top = int(height * CONFIG.roi_top_ratio)
             roi_w = int(width * CONFIG.roi_width_ratio)
             roi_h = int(height * CONFIG.roi_height_ratio)
+
+            # Clamp ROI to valid bounds to avoid empty crop on unusual window sizes.
+            roi_left = max(0, min(width - 1, roi_left))
+            roi_top = max(0, min(height - 1, roi_top))
+            roi_w = max(1, min(width - roi_left, roi_w))
+            roi_h = max(1, min(height - roi_top, roi_h))
             
             frame_bgr = full_window_bgr[roi_top:roi_top+roi_h, roi_left:roi_left+roi_w]
             frame_processed = preprocess(frame_bgr)
             # -------------------------------------------------------------------
 
             # Pass the scale factor for resolution independence
-            score, name, center_loc = best_match_score(frame_processed, templates, scale=scale)
-            is_hit = score >= CONFIG.match_threshold
+            score, name, center_loc, all_matches = best_match_score(frame_processed, templates, scale=scale)
+
+            # Action detection excludes chat.png; use the best non-chat template score.
+            action_score = -1.0
+            action_template = ""
+            for tpl_name, tpl_score in all_matches:
+                if normalize_template_name(tpl_name) == chat_template_key:
+                    continue
+                if tpl_score > action_score:
+                    action_score = tpl_score
+                    action_template = tpl_name
+
+            is_hit = action_score >= CONFIG.match_threshold
+
+            # Battle count is strictly based on chat.png transition: False -> True.
+            chat_score = next(
+                (s for n, s in all_matches if normalize_template_name(n) == chat_template_key),
+                0.0,
+            )
+            chat_detected_current = chat_score >= CONFIG.match_threshold
+
+            if not chat_detected_last and chat_detected_current:
+                battle_count += 1
+                logging.info(
+                    "检测到新战斗，当前战斗次数=%d（聊天分数=%.3f）",
+                    battle_count,
+                    chat_score,
+                )
+                log_audit(
+                    "战斗次数增加",
+                    战斗次数=battle_count,
+                )
+            chat_detected_last = chat_detected_current
 
             if is_hit:
                 hit_streak += 1
@@ -409,52 +479,39 @@ def run() -> None:
             else:
                 detected = miss_streak < CONFIG.release_misses
 
-            logging.info(
-                "score=%.3f hit=%s hit_streak=%d miss_streak=%d tpl=%s",
-                score,
-                is_hit,
-                hit_streak,
-                miss_streak,
-                name,
-            )
+            if mode == "count_only":
+                logging.info(
+                    "聊天检测=%s 聊天分数=%.3f 战斗次数=%d",
+                    chat_detected_current,
+                    chat_score,
+                    battle_count,
+                )
+            else:
+                logging.info(
+                    "行动检测=%s 行动分数=%.3f 检测模板=%s 聊天检测=%s 聊天分数=%.3f 战斗次数=%d",
+                    is_hit,
+                    action_score,
+                    action_template,
+                    chat_detected_current,
+                    chat_score,
+                    battle_count,
+                )
 
             now = time.time()
             cooldown_ready = (now - last_trigger_time) >= CONFIG.trigger_cooldown_sec
             
             # Action logic based on mode
-            if detected:
+            if mode != "count_only" and detected:
                 # IMPORTANT: Only trigger if we actually matched a template (is_hit)
                 # This prevents triggering on "miss_streak" logic when we haven't seen the target
                 if is_hit and (now - last_trigger_time >= CONFIG.trigger_cooldown_sec):
                     if mode == "battle":
                         press_once(hwnd, CONFIG.press_key)
                         last_trigger_time = now
-                        logging.info("Triggered key: %s (Continuous)", CONFIG.press_key)
-                        log_audit(
-                            "TRIGGER_BATTLE_KEY",
-                            mode=mode,
-                            key=CONFIG.press_key,
-                            hwnd=hwnd,
-                            score=round(score, 4),
-                            template=name,
-                            hit_streak=hit_streak,
-                            miss_streak=miss_streak,
-                            cooldown_sec=CONFIG.trigger_cooldown_sec,
-                        )
+                        logging.info("已触发按键: %s（连续模式）", CONFIG.press_key)
                     elif mode == "escape":
                         press_once(hwnd, "esc")
-                        logging.info("Triggered Escape")
-                        log_audit(
-                            "TRIGGER_ESCAPE_KEY",
-                            mode=mode,
-                            key="esc",
-                            hwnd=hwnd,
-                            score=round(score, 4),
-                            template=name,
-                            hit_streak=hit_streak,
-                            miss_streak=miss_streak,
-                            cooldown_sec=CONFIG.trigger_cooldown_sec,
-                        )
+                        logging.info("已触发 ESC")
                         
                         # Capture again to find "Yes" button in popup
                         button_clicked = False
@@ -485,7 +542,7 @@ def run() -> None:
                                     click_x = max(0, min(width - 1, click_x))
                                     click_y = max(0, min(height - 1, click_y))
                                     logging.debug(
-                                        "Click coord normalized: shot=%sx%s client=%sx%s raw=(%s,%s) mapped=(%s,%s)",
+                                        "点击坐标归一化: 截图=%sx%s 客户区=%sx%s 原始=(%s,%s) 映射=(%s,%s)",
                                         cap_w,
                                         cap_h,
                                         width,
@@ -499,34 +556,15 @@ def run() -> None:
                                 click_ok = click_at(hwnd, click_x, click_y)
                                 button_clicked = click_ok
                                 if click_ok:
-                                    log_audit(
-                                        "ESCAPE_YES_CLICK_SUCCESS",
-                                        mode=mode,
-                                        hwnd=hwnd,
-                                        score=round(score, 4),
-                                        template=name,
-                                        yes_score=round(best_score_this_round, 4),
-                                        threshold=round(yes_threshold, 4),
-                                        click_x=click_x,
-                                        click_y=click_y,
-                                        click_method="physical",
-                                        attempt=i + 1,
-                                    )
+                                    log_audit("逃跑确认点击成功", 模式=mode)
                                     break
                         
                         if not button_clicked:
-                            logging.warning("Could not find confirmation button 'yes.png' after ESC")
+                            logging.warning("触发 ESC 后未找到确认按钮 yes.png")
                             log_audit(
-                                "ESCAPE_YES_CLICK_FAILED",
-                                mode=mode,
-                                hwnd=hwnd,
-                                score=round(score, 4),
-                                template=name,
-                                best_yes_score=round(yes_best_score, 4),
-                                best_yes_x=yes_best_loc[0],
-                                best_yes_y=yes_best_loc[1],
-                                threshold=round(yes_threshold, 4),
-                                click_method="physical",
+                                "逃跑确认点击失败",
+                                模式=mode,
+                                最佳是按钮分数=round(yes_best_score, 4),
                             )
                         
                         # Use a longer cooldown for escape to prevent ESC spamming while dialog is closing
